@@ -7,10 +7,12 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(about = "Formatting: - uncovered, ? covered, X known bomb, [1 - 9] numbers")]
+#[command(about = "Formatting: '-' uncovered, '?' covered, 'X' known bomb, [1 - 9] numbers")]
 struct Args {
     #[arg(short, long)]
     file: PathBuf,
+    #[arg(short, long, help = "Shows individual board possibilities instead of only the guaranteed cells")]
+    show_possibilities: bool,
 }
 
 fn main() {
@@ -23,7 +25,7 @@ fn main() {
         return;
     };
 
-    let board = match Board::from_string(data) {
+    let initial_board = match Board::from_string(data) {
         Ok(board) => board,
         Err(e) => {
             println!("{e}");
@@ -31,9 +33,9 @@ fn main() {
         }
     };
 
-    println!("Input:\n{board}");
+    println!("Input:\n{initial_board}\n");
 
-    match board.validate_board() {
+    match initial_board.validate_board() {
         Ok(remaining) => {
             if remaining == 0 {
                 println!("Board already solved");
@@ -42,6 +44,11 @@ fn main() {
         }
         Err(e) => { println!("Invalid board:\n\t{e}"); return; }
     }
+
+    let mut board = initial_board.clone();
+
+    while board.complete_solvable() {}
+    println!("After static analysis:\n{board}\n");
 
     let mut open_boards = VecDeque::new();
     let mut visited = HashSet::new();
@@ -61,7 +68,9 @@ fn main() {
         let (solved_boards, new_open_boards) = board.get_possible_boards(&mut visited, &mut ignore);
 
         for board in solved_boards {
-            println!("Possible board found:\n{board}\n");
+            if args.show_possibilities {
+                println!("Possible board found:\n{board}\n");
+            }
             possibilities.push(board);
         }
 
@@ -70,9 +79,19 @@ fn main() {
         }
     }
 
-    println!("Finished finding solutions - {} possibilities", possibilities.len());
+    println!("Finished finding solutions - {} possibilities\n", possibilities.len());
 
-    println!("Guaranteed cells:\n{}", Board::compile_guaranteed(&board, &possibilities, &ignore));
+    let guaranteed = Board::compile_guaranteed(&initial_board, &possibilities, &ignore);
+    if let Ok(string) = guaranteed {
+        println!("Guaranteed cells:\n{string}\n\nKey:\n\t# - Guaranteed bomb\n\tO - Guaranteed safe\n");
+    }
+    else {
+        println!("No cells are definitively a bomb or safe\n");
+    }
+
+    if !args.show_possibilities {
+        println!("Use the -s argument to show individual board possibilities");
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -144,7 +163,7 @@ struct Board {
 }
 
 impl Board {
-    pub fn compile_guaranteed(base: &Board, possibilities: &[Board], ignore: &HashSet<(usize, usize)>) -> String {
+    pub fn compile_guaranteed(base: &Board, possibilities: &[Board], ignore: &HashSet<(usize, usize)>) -> Result<String, ()> {
         let mut board = Vec::with_capacity(base.height);
         for _ in 0..base.height {
             let mut line = Vec::with_capacity(base.width);
@@ -175,6 +194,7 @@ impl Board {
         }
 
         let mut output = String::new();
+        let mut found = false;
 
         for y in 0..base.height {
             for x in 0..base.width {
@@ -183,9 +203,11 @@ impl Board {
                 }
                 else if board[y][x].0 && !board[y][x].1 {
                     output.push('#');
+                    found = true;
                 }
                 else if !board[y][x].0 && board[y][x].1  {
                     output.push('O');
+                    found = true;
                 }
                 else {
                     output.push('?');
@@ -196,7 +218,12 @@ impl Board {
 
         output.remove(output.len() - 1);
 
-        output
+        if found {
+            Ok(output)
+        }
+        else {
+            Err(())
+        }
     }
 
     pub fn from_string(input: String) -> Result<Board, String> {
@@ -238,6 +265,56 @@ impl Board {
             width,
             height,
         })
+    }
+
+    pub fn complete_solvable(&mut self) -> bool {
+        let mut change_made = false;
+
+        for x in 0..self.width {
+            for y in 0..self.height {
+                let mut required = match &self.board[y][x] {
+                    CellTypes::Value(v) => *v,
+                    _ => continue,
+                } as i32;
+                if required == 0 { continue; }
+
+                let mut possible_cells = Vec::new();
+
+                for offset in [(-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1)] {
+                    let (x, y) = (x as i32 + offset.0, y as i32 + offset.1);
+                    if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                        continue;
+                    }
+
+                    let (x, y) = (x as usize, y as usize);
+
+                    match &self.board[y][x] {
+                        CellTypes::Value(_) => continue,
+                        CellTypes::Bomb => required -= 1,
+                        CellTypes::Covered => possible_cells.push(offset),
+                    };
+                }
+
+                if required == possible_cells.len() as i32 {
+                    for offset in possible_cells {
+                        let (x, y) = (x as i32 + offset.0, y as i32 + offset.1);
+                        let (x, y) = (x as usize, y as usize);
+                        self.board[y][x] = CellTypes::Bomb;
+                        change_made = true;
+                    }
+                }
+                else if required == 0 {
+                    for offset in possible_cells {
+                        let (x, y) = (x as i32 + offset.0, y as i32 + offset.1);
+                        let (x, y) = (x as usize, y as usize);
+                        self.board[y][x] = CellTypes::Value(0);
+                        change_made = true
+                    }
+                }
+            }
+        }
+
+        change_made
     }
 
     pub fn validate_board(&self) -> Result<usize, String> {
@@ -330,12 +407,10 @@ impl Board {
 
     pub fn get_hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
-        let mut index = 0;
 
         for line in &self.board {
             for cell in line {
                 cell.id().hash(&mut hasher);
-                index += 1;
             }
         }
 
