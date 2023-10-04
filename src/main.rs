@@ -5,6 +5,7 @@ use clap::Parser;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use itertools::Itertools;
 
 #[derive(Parser, Debug)]
 #[command(about = "Formatting: '-' uncovered, '?' covered, 'X' known bomb, [1 - 9] numbers")]
@@ -82,12 +83,7 @@ fn main() {
     println!("Finished finding solutions - {} possibilities\n", possibilities.len());
 
     let guaranteed = Board::compile_guaranteed(&initial_board, &possibilities, &ignore);
-    if let Ok(string) = guaranteed {
-        println!("Guaranteed cells:\n{string}\n\nKey:\n\t# - Guaranteed bomb\n\tO - Guaranteed safe\n");
-    }
-    else {
-        println!("No cells are definitively a bomb or safe\n");
-    }
+    println!("{guaranteed}");
 
     if !args.show_possibilities {
         println!("Use the -s argument to show individual board possibilities");
@@ -163,13 +159,13 @@ struct Board {
 }
 
 impl Board {
-    pub fn compile_guaranteed(base: &Board, possibilities: &[Board], ignore: &HashSet<(usize, usize)>) -> Result<String, ()> {
+    pub fn compile_guaranteed(base: &Board, possibilities: &[Board], ignore: &HashSet<(usize, usize)>) -> String {
         let mut board = Vec::with_capacity(base.height);
         for _ in 0..base.height {
             let mut line = Vec::with_capacity(base.width);
             for _ in 0..base.width {
                 // Bomb, Not
-                line.push((false, false));
+                line.push((0usize, 0usize));
             }
             board.push(line);
         }
@@ -184,45 +180,67 @@ impl Board {
                     };
 
                     if is_bomb {
-                        board[y][x] = (true, board[y][x].1);
+                        board[y][x] = (board[y][x].0 + 1, board[y][x].1);
                     }
                     else {
-                        board[y][x] = (board[y][x].0, true);
+                        board[y][x] = (board[y][x].0, board[y][x].1 + 1);
                     }
                 }
             }
         }
 
-        let mut output = String::new();
+        let mut board_probabilities = Vec::with_capacity(base.height);
+        let mut output = Vec::with_capacity(base.height);
         let mut found = false;
 
         for y in 0..base.height {
+            output.push(Vec::with_capacity(base.width));
+            board_probabilities.push(Vec::with_capacity(base.width));
             for x in 0..base.width {
-                if !board[y][x].0 && !board[y][x].1 || ignore.contains(&(x, y)) || (board[y][x].0 && !board[y][x].1 && matches!(base.board[y][x], CellTypes::Bomb)) {
-                    output.push(base.board[y][x].char());
+                board_probabilities[y].push(0f64);
+                if board[y][x].0 == 0 && board[y][x].1 == 0 || ignore.contains(&(x, y)) || (board[y][x].0 > 0 && board[y][x].1 == 0 && matches!(base.board[y][x], CellTypes::Bomb)) {
+                    output[y].push(base.board[y][x].char());
                 }
-                else if board[y][x].0 && !board[y][x].1 {
-                    output.push('#');
+                else if board[y][x].0 > 0 && board[y][x].1 == 0 {
+                    output[y].push('#');
                     found = true;
                 }
-                else if !board[y][x].0 && board[y][x].1  {
-                    output.push('O');
+                else if board[y][x].0 == 0 && board[y][x].1 > 0 {
+                    output[y].push('O');
                     found = true;
                 }
                 else {
-                    output.push('?');
+                    if !found {
+                        board_probabilities[y][x] = (board[y][x].1 as f64) / (board[y][x].1 as f64 + board[y][x].0 as f64);
+                    }
+
+                    output[y].push('?');
                 }
             }
-            output.push('\n');
         }
 
-        output.remove(output.len() - 1);
 
         if found {
-            Ok(output)
+            let output_string = output.into_iter().map(|line| line.into_iter().collect::<String>()).join("\n");
+            format!("Guaranteed cells:\n{output_string}\n\nKey:\n\t'#' - Guaranteed bomb\n\t'O' - Guaranteed safe\n")
         }
         else {
-            Err(())
+            let mut max: Option<(f64, (usize, usize))> = None;
+            for y in 0..base.height {
+                for x in 0..base.width {
+                    if max.is_none() || board_probabilities[y][x] > max.unwrap().0 {
+                        max = Some((board_probabilities[y][x], (x, y)));
+                    }
+                }
+            }
+
+            let (x, y) = max.unwrap().1;
+            let probability = max.unwrap().0;
+
+            output[y][x] = '@';
+            let output_string = output.into_iter().map(|line| line.into_iter().collect::<String>()).join("\n");
+
+            format!("{output_string}\n\nCell marked '@' is most likely to be empty with a chance of {:.2}% - No cells are definitively a bomb or safe\n", (probability * 100.0))
         }
     }
 
